@@ -1,0 +1,23 @@
+/* Thumbnail hover zoom for card images */
+
+.thumbnail-wrapper {
+  position: relative;
+  z-index: 1;
+}
+
+.thumbnail-wrapper:hover {
+  z-index: 1060;
+}
+
+.thumbnail-wrapper .thumbnail-zoom {
+  display: none;
+  top: 0;
+  left: 72px;
+  max-height: 256px;
+  z-index: 1060;
+}
+
+.thumbnail-wrapper:hover .thumbnail-zoom {
+  display: block;
+}
+

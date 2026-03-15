@@ -1,0 +1,105 @@
+openapi: 3.0.3
+info:
+  title: Card Extraction Service API
+  description: |
+    Versioned API for image and (future) text processing.
+    Extracts MTG card names from images via OpenCV + Tesseract.
+    Additional endpoints (e.g. POST /v1/process/text for pasted lists) will
+    follow the same versioning and response envelope pattern.
+  version: 1.0.0
+servers:
+  - url: /v1
+    description: API v1 base path
+paths:
+  /extract/cards:
+    post:
+      summary: Extract card names from images
+      description: Accepts base64-encoded images; returns card names per image (detection order).
+      operationId: extractCards
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExtractCardsRequest'
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExtractCardsResponse'
+        '400':
+          description: Invalid payload
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Processing error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+components:
+  schemas:
+    ExtractCardsRequest:
+      type: object
+      required:
+        - images
+      properties:
+        images:
+          type: array
+          items:
+            type: string
+            format: byte
+            description: Base64-encoded image bytes (JPEG/PNG)
+      additionalProperties: false
+    ExtractCardsResponse:
+      type: object
+      required:
+        - results
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExtractResultItem'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    ExtractResultItem:
+      type: object
+      required:
+        - image_index
+        - card_names
+      properties:
+        image_index:
+          type: integer
+          minimum: 0
+          description: Index of the input image
+        card_names:
+          type: array
+          items:
+            type: string
+          description: Card names in detection order
+    ResponseMeta:
+      type: object
+      properties:
+        processor:
+          type: string
+          description: Processor identifier (e.g. opencv+tesseract)
+        version:
+          type: string
+          description: Optional processor version
+    Error:
+      type: object
+      properties:
+        detail:
+          type: string
+        code:
+          type: string
