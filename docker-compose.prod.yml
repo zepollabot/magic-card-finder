@@ -1,0 +1,70 @@
+services:
+  extraction:
+    build:
+      context: ./extraction_service
+      dockerfile: Dockerfile
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL-INFO}
+      - WORKER_THREADS=${EXTRACTION_WORKER_THREADS-}
+    ports:
+      - "8001:8001"
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001"]
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql+psycopg2://postgres:postgres@db:5432/magic_cards
+      - OLLAMA_HOST=${OLLAMA_HOST-http://host.docker.internal:11434}
+      - EXTRACTION_SERVICE_URL=${EXTRACTION_SERVICE_URL-http://extraction:8001}
+      # Optional: pricing/API client logs (INFO or DEBUG)
+      - LOG_LEVEL=${LOG_LEVEL-INFO}
+      # Optional price sources (see README "Configuring optional price sources")
+      - OPEN_TCG_API_ENABLED=${OPEN_TCG_API_ENABLED-0}
+      - OPEN_TCG_API_BASE_URL=${OPEN_TCG_API_BASE_URL-https://tcgtracking.com/tcgapi/v1}
+      - CARDMARKET_API_ENABLED=${CARDMARKET_API_ENABLED-0}
+      - CARDMARKET_APP_TOKEN=${CARDMARKET_APP_TOKEN}
+      - CARDMARKET_APP_SECRET=${CARDMARKET_APP_SECRET}
+      - CARDMARKET_ACCESS_TOKEN=${CARDMARKET_ACCESS_TOKEN}
+      - CARDTRADER_API_ENABLED=${CARDTRADER_API_ENABLED-0}
+      - CARDTRADER_API_TOKEN=${CARDTRADER_API_TOKEN}
+    ports:
+      - "8000:8000"
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    environment:
+      - VITE_PROXY_TARGET=http://backend:8000
+    ports:
+      - "5173:5173"
+    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
+    depends_on:
+      - backend
+
+  db:
+    image: postgres:18
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=magic_cards
+    ports:
+      - "5432:5432"
+    volumes:
+      # Persist DB data in a host directory for easier inspection/backups
+      # Postgres 18+ expects mount at /var/lib/postgresql (not .../data)
+      - ./db-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 5
+

@@ -34,10 +34,13 @@ build:
 	docker compose build --no-cache
 
 start:
-	docker compose up --build
+	docker compose -f docker-compose.dev.yml up --build
 
 stop:
 	docker compose down --remove-orphans
+
+start-prod:
+	docker compose -f docker-compose.prod.yml up --build
 
 reset-db:
 	docker compose exec db psql -U postgres -d postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'magic_cards';" || true
