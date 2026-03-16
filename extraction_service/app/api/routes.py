@@ -42,10 +42,14 @@ def extract_cards(request: Request, body: ExtractCardsRequest) -> ExtractCardsRe
         logger.exception("extract/cards: extraction failed")
         raise HTTPException(status_code=500, detail=str(e)) from e
 
-    results = [
-        ExtractResultItem(image_index=idx, card_names=names)
-        for idx, names in results_tuples
-    ]
+    results = []
+    for idx, names in results_tuples:
+        logger.info(
+            "extract/cards: image_index=%d, extracted_names=%s",
+            idx,
+            [n for n in names if n],
+        )
+        results.append(ExtractResultItem(image_index=idx, card_names=names))
     total_names = sum(len(r.card_names) for r in results)
     logger.info(
         "extract/cards: done — %d result(s), %d card name(s) total (per image: %s)",

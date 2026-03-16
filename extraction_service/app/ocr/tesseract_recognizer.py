@@ -1,6 +1,10 @@
 """Tesseract-based card title OCR with preprocessing."""
 from typing import Union
 
+import logging
+import os
+import uuid
+
 import cv2
 import numpy as np
 import pytesseract
@@ -18,6 +22,9 @@ UPSCALE = 3
 BORDER_PX = 20
 
 
+logger = logging.getLogger(__name__)
+
+
 class TesseractCardRecognizer:
     """
     Preprocesses card image, crops the title zone, and runs Tesseract
@@ -26,7 +33,23 @@ class TesseractCardRecognizer:
 
     def __init__(self, lang: str = DEFAULT_LANGS) -> None:
         self.lang = lang
-        self._tess_config = "--psm 7 --oem 3"
+        # When true, log raw / cleaned outputs for each Tesseract config.
+        self._debug_tesseract = bool(os.getenv("OCR_DEBUG_TESSERACT", "").strip())
+        base_whitelist = os.getenv(
+            "TESSERACT_TITLE_WHITELIST",
+            "0123456789"
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            "abcdefghijklmnopqrstuvwxyz"
+            " ,.'-",
+        )
+        self._tess_configs = [
+            # Original, un-whitelisted config (kept first because it worked well
+            # on many titles, including clean ones like the debug samples).
+            "--psm 7 --oem 3",
+            # Stricter configs that can help on noisier scans.
+            f"--psm 7 --oem 3 -c tessedit_char_whitelist={base_whitelist}",
+            f"--psm 6 --oem 3 -c tessedit_char_whitelist={base_whitelist}",
+        ]
 
     def recognize(self, card_image: Union[bytes, np.ndarray]) -> str:
         if isinstance(card_image, bytes):
@@ -38,10 +61,29 @@ class TesseractCardRecognizer:
             return ""
         roi = self._crop_title_zone(img)
         preprocessed = self._preprocess(roi)
-        raw = pytesseract.image_to_string(
-            preprocessed, lang=self.lang, config=self._tess_config
+
+        # Optional debug: dump ROI and preprocessed image to disk when
+        # OCR_DEBUG_DIR is set (e.g. "/tmp/ocr-debug").
+        debug_dir = os.getenv("OCR_DEBUG_DIR", "").strip()
+        if debug_dir:
+            try:
+                os.makedirs(debug_dir, exist_ok=True)
+                suffix = uuid.uuid4().hex[:8]
+                roi_path = os.path.join(debug_dir, f"title_roi_{suffix}.png")
+                pre_path = os.path.join(debug_dir, f"title_preprocessed_{suffix}.png")
+                cv2.imwrite(roi_path, roi)
+                cv2.imwrite(pre_path, preprocessed)
+            except Exception:
+                # Debugging helper – failures here must not break OCR.
+                pass
+
+        cleaned = self._run_tesseract(preprocessed)
+        logger.debug(
+            "tesseract recognizer: cleaned=%r (empty=%s)",
+            cleaned,
+            not bool(cleaned),
         )
-        return self._clean_text(raw)
+        return cleaned
 
     def _crop_title_zone(self, img: np.ndarray) -> np.ndarray:
         h, w = img.shape[:2]
@@ -58,9 +100,31 @@ class TesseractCardRecognizer:
         )
         gray = cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY)
 
-        binary = cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 15
-        )
+        # Heuristic: if the image is already almost pure black/white (like our
+        # preprocessed debug strips), avoid heavy filtering which can break
+        # thin glyphs. We detect this by measuring how many pixels are very
+        # dark or very light.
+        total = gray.size
+        if total == 0:
+            return gray
+        dark = (gray <= 30).sum()
+        light = (gray >= 225).sum()
+        bw_ratio = (dark + light) / float(total)
+
+        if bw_ratio > 0.9:
+            # Minimal preprocessing: keep existing binary structure, just close
+            # small gaps and add a border.
+            binary = gray
+        else:
+            denoised = cv2.medianBlur(gray, 3)
+            binary = cv2.adaptiveThreshold(
+                denoised,
+                255,
+                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY,
+                31,
+                10,
+            )
 
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
         binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
@@ -72,6 +136,35 @@ class TesseractCardRecognizer:
             value=255,
         )
         return padded
+
+    def _run_tesseract(self, preprocessed: np.ndarray) -> str:
+        """
+        Run Tesseract with a couple of configs and pick the best result.
+        Heuristic: prefer the longest non-empty cleaned string.
+        """
+        best: str = ""
+        for cfg in self._tess_configs:
+            try:
+                raw = pytesseract.image_to_string(
+                    preprocessed,
+                    lang=self.lang,
+                    config=cfg,
+                )
+            except Exception:
+                continue
+            cleaned = self._clean_text(raw)
+            if self._debug_tesseract:
+                # Log a short preview to avoid huge lines.
+                preview = cleaned[:80]
+                logger.debug(
+                    "tesseract cfg=%r raw_len=%d cleaned_preview=%r",
+                    cfg,
+                    len(raw or ""),
+                    preview,
+                )
+            if cleaned and len(cleaned) > len(best):
+                best = cleaned
+        return best
 
     @staticmethod
     def _clean_text(text: str) -> str:

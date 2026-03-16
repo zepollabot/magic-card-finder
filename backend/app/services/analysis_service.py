@@ -88,6 +88,12 @@ class AnalysisService:
                 await reporter.step_start("card_detection", 1, "Card extraction (OCR)")
                 names_per_image = await self.card_name_extractor.extract_names_from_images(image_bytes)
                 await reporter.step_complete("card_detection", 1)
+                for img_idx, names in enumerate(names_per_image):
+                    logger.info(
+                        "image analysis: extraction raw names for image %d: %s",
+                        img_idx,
+                        [n for n in names if n and n.strip()],
+                    )
                 await reporter.step_start("card_recognition", 2, "Recognizing detected cards")
                 await reporter.step_complete("card_recognition", 2)
                 all_names = [name for names in names_per_image for name in names if name and name.strip()]
