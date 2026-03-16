@@ -1,14 +1,12 @@
-from types import SimpleNamespace
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
-import asyncio
 import cv2
 import logging
 
 from ..db import SessionLocal
 
 logger = logging.getLogger(__name__)
-from ..models import Analysis, AnalysisCard, AnalysisPrice, Card, Price
+from ..models import Analysis, AnalysisCard, AnalysisPrice, Card
 from ..schemas import AnalyzeRequest, AnalysisResponse, CardReportItem, CardPriceInfo
 from .image_ingest import ImageIngestService
 from .card_detection import CardDetectionService
@@ -25,11 +23,8 @@ class AnalysisService:
     """
     Application service that orchestrates image-based and name-based analyses.
 
-    This keeps route handlers thin and follows SOLID by:
-    - Single Responsibility: one class coordinates the analysis use cases.
-    - Open/Closed: new analysis flows can be added via new methods.
-    - Dependency Inversion: depends on abstractions (service interfaces),
-      which can be swapped in tests.
+    All features converge on the same resolve-price-persist pipeline via
+    ``_resolve_and_price_cards``, so the pricing logic is never duplicated.
     """
 
     def __init__(
@@ -50,12 +45,17 @@ class AnalysisService:
         self.name_resolver = name_resolver or ScryfallCardNameResolver(self.scryfall)
         self.card_name_extractor = card_name_extractor
 
+    # ------------------------------------------------------------------
+    # Public entry points
+    # ------------------------------------------------------------------
+
     async def analyze_images_and_urls(
         self,
         request: AnalyzeRequest,
         file_bytes: List[bytes],
         progress: Optional[ProgressReporter] = None,
     ) -> AnalysisResponse:
+        """Extract card names from images, then run the shared price pipeline."""
         reporter: ProgressReporter = progress or NoOpProgressReporter()
         image_bytes: List[bytes] = []
 
@@ -73,282 +73,134 @@ class AnalysisService:
         step_index_by_id = {s.id: s.index for s in steps}
         await reporter.start_steps(steps)
 
-        db = SessionLocal()
-        try:
-            analysis = Analysis(
-                source_urls=",".join([str(u) for u in (request.urls or [])]) or None,
-            )
-            db.add(analysis)
-            db.flush()
+        upload_idx = step_index_by_id.get("image_upload")
+        if upload_idx is not None:
+            await reporter.step_start("image_upload", upload_idx, "Processing uploaded images")
+            await reporter.step_complete("image_upload", upload_idx)
 
-            card_reports: List[CardReportItem] = []
+        card_names = await self._extract_names_from_images(
+            image_bytes, step_index_by_id, reporter,
+        )
 
-            if self.card_name_extractor:
-                logger.info("image analysis: using extraction service for %d image(s)", len(image_bytes))
-                await reporter.step_start("card_detection", 1, "Card extraction (OCR)")
-                names_per_image = await self.card_name_extractor.extract_names_from_images(image_bytes)
-                await reporter.step_complete("card_detection", 1)
-                for img_idx, names in enumerate(names_per_image):
-                    logger.info(
-                        "image analysis: extraction raw names for image %d: %s",
-                        img_idx,
-                        [n for n in names if n and n.strip()],
-                    )
-                await reporter.step_start("card_recognition", 2, "Recognizing detected cards")
-                await reporter.step_complete("card_recognition", 2)
-                all_names = [name for names in names_per_image for name in names if name and name.strip()]
-                logger.info(
-                    "image analysis: extraction returned %d card name(s) (per image: %s), resolving via Scryfall",
-                    len(all_names),
-                    [len(n) for n in names_per_image],
-                )
-                rec_results_for_extractor = [SimpleNamespace(card_name=n) for n in all_names]
-            else:
-                rec_results_for_extractor = None
-
-            def _resolve_and_report(rec_results: list, step_total: int):
-                async def resolve_and_price(rec_index: int, card_name: str):
-                    if not card_name:
-                        return []
-                    await reporter.progress("scryfall_normalize", rec_index + 1, step_total)
-                    cards = await self.name_resolver.resolve(card_name, set_hint=None)
-                    results = []
-                    for scry in cards:
-                        scryfall_id = scry.get("id")
-                        if not scryfall_id:
-                            continue
-                        prices = await self.pricing.get_prices_for_card(scry)
-                        results.append((card_name, scry, prices))
-                    return results
-
-                return resolve_and_price
-
-            if self.card_name_extractor and rec_results_for_extractor is not None:
-                rec_results = rec_results_for_extractor
-                scry_idx = step_index_by_id.get("scryfall_normalize", 3)
-                await reporter.step_start("scryfall_normalize", scry_idx, "Normalizing cards via Scryfall")
-                resolve_and_price = _resolve_and_report(rec_results, len(rec_results))
-                tasks = [resolve_and_price(idx, rec.card_name or "") for idx, rec in enumerate(rec_results)]
-                results = await asyncio.gather(*tasks, return_exceptions=False)
-                await reporter.step_complete("scryfall_normalize", scry_idx)
-                for src_name in price_source_names:
-                    step_id = f"price_source_{src_name}"
-                    idx = step_index_by_id.get(step_id)
-                    if idx is not None:
-                        await reporter.step_start(step_id, idx, f"Fetch prices from {src_name}")
-                        await reporter.step_complete(step_id, idx)
-                report_idx = step_index_by_id.get("report_generation", 4)
-                await reporter.step_start("report_generation", report_idx, "Persisting results and building report")
-                for result_list in results:
-                    if not result_list:
-                        continue
-                    for _, scry, prices in result_list:
-                        scryfall_id = scry.get("id")
-                        if not scryfall_id:
-                            continue
-                        card = db.query(Card).filter_by(scryfall_id=scryfall_id).one_or_none()
-                        if card is None:
-                            image_uris = scry.get("image_uris") or {}
-                            card = Card(
-                                scryfall_id=scryfall_id,
-                                name=scry.get("name"),
-                                set_code=scry.get("set"),
-                                set_name=scry.get("set_name"),
-                                collector_number=scry.get("collector_number"),
-                                image_url=image_uris.get("normal"),
-                                thumbnail_url=image_uris.get("small") or image_uris.get("normal"),
-                            )
-                            db.add(card)
-                            db.flush()
-                        ac = AnalysisCard(analysis_id=analysis.id, card_id=card.id)
-                        db.add(ac)
-                        db.flush()
-                        set_name_display = scry.get("set_name")
-                        col_num = scry.get("collector_number")
-                        for p in prices:
-                            db.add(
-                                AnalysisPrice(
-                                    analysis_card_id=ac.id,
-                                    source=p.source,
-                                    currency=p.currency,
-                                    price_low=p.price_low,
-                                    price_avg=p.price_avg,
-                                    price_high=p.price_high,
-                                    trend_price=p.trend_price,
-                                    set_name=set_name_display,
-                                    collector_number=col_num,
-                                )
-                            )
-                        prices_with_set = [
-                            CardPriceInfo(
-                                source=p.source,
-                                currency=p.currency,
-                                price_low=p.price_low,
-                                price_avg=p.price_avg,
-                                price_high=p.price_high,
-                                trend_price=p.trend_price,
-                                set_name=scry.get("set_name"),
-                                collector_number=scry.get("collector_number"),
-                            )
-                            for p in prices
-                        ]
-                        card_reports.append(
-                            CardReportItem(
-                                card_name=card.name,
-                                set_name=scry.get("set_name"),
-                                collector_number=card.collector_number,
-                                image_url=card.image_url,
-                                prices=prices_with_set,
-                            )
-                        )
-                await reporter.step_complete("report_generation", report_idx)
-            else:
-                det_idx = step_index_by_id.get("card_detection", 1)
-                rec_idx = step_index_by_id.get("card_recognition", 2)
-                scry_idx = step_index_by_id.get("scryfall_normalize", 3)
-                report_idx = step_index_by_id.get("report_generation", 4)
-                for img in image_bytes:
-                    await reporter.step_start("card_detection", det_idx, "Detecting cards in image")
-                    detections = self.detector.detect_cards(img)
-                    await reporter.step_complete("card_detection", det_idx)
-                    if not detections:
-                        continue
-
-                    await reporter.step_start("card_recognition", rec_idx, "Recognizing detected cards")
-                    crops: List[bytes] = []
-                    for det in detections:
-                        _, buf = cv2.imencode(".png", det.image)
-                        crops.append(buf.tobytes())
-
-                    rec_results = await self.recognizer.recognize_cards(crops)
-                    await reporter.step_complete("card_recognition", rec_idx)
-
-                    resolve_and_price = _resolve_and_report(rec_results, len(rec_results))
-
-                    await reporter.step_start("scryfall_normalize", scry_idx, "Normalizing cards via Scryfall")
-                    tasks = [
-                        resolve_and_price(idx, rec.card_name or "")
-                        for idx, rec in enumerate(rec_results)
-                    ]
-                    results = await asyncio.gather(*tasks, return_exceptions=False)
-                    await reporter.step_complete("scryfall_normalize", scry_idx)
-
-                    for src_name in price_source_names:
-                        step_id = f"price_source_{src_name}"
-                        idx = step_index_by_id.get(step_id)
-                        if idx is not None:
-                            await reporter.step_start(step_id, idx, f"Fetch prices from {src_name}")
-                            await reporter.step_complete(step_id, idx)
-
-                    await reporter.step_start("report_generation", report_idx, "Persisting results and building report")
-                    for result_list in results:
-                        if not result_list:
-                            continue
-                        for _, scry, prices in result_list:
-                            scryfall_id = scry.get("id")
-                            if not scryfall_id:
-                                continue
-
-                            card = db.query(Card).filter_by(scryfall_id=scryfall_id).one_or_none()
-                            if card is None:
-                                image_uris = scry.get("image_uris") or {}
-                                card = Card(
-                                    scryfall_id=scryfall_id,
-                                    name=scry.get("name"),
-                                    set_code=scry.get("set"),
-                                    set_name=scry.get("set_name"),
-                                    collector_number=scry.get("collector_number"),
-                                    image_url=image_uris.get("normal"),
-                                    thumbnail_url=image_uris.get("small") or image_uris.get("normal"),
-                                )
-                                db.add(card)
-                                db.flush()
-
-                            ac = AnalysisCard(analysis_id=analysis.id, card_id=card.id)
-                            db.add(ac)
-                            db.flush()
-
-                            set_name_display = scry.get("set_name")
-                            col_num = scry.get("collector_number")
-                            for p in prices:
-                                db.add(
-                                    AnalysisPrice(
-                                        analysis_card_id=ac.id,
-                                        source=p.source,
-                                        currency=p.currency,
-                                        price_low=p.price_low,
-                                        price_avg=p.price_avg,
-                                        price_high=p.price_high,
-                                        trend_price=p.trend_price,
-                                        set_name=set_name_display,
-                                        collector_number=col_num,
-                                    )
-                                )
-
-                            prices_with_set = [
-                                CardPriceInfo(
-                                    source=p.source,
-                                    currency=p.currency,
-                                    price_low=p.price_low,
-                                    price_avg=p.price_avg,
-                                    price_high=p.price_high,
-                                    trend_price=p.trend_price,
-                                    set_name=scry.get("set_name"),
-                                    collector_number=scry.get("collector_number"),
-                                )
-                                for p in prices
-                            ]
-                            card_reports.append(
-                                CardReportItem(
-                                    card_name=card.name,
-                                    set_name=scry.get("set_name"),
-                                    collector_number=card.collector_number,
-                                    image_url=card.image_url,
-                                    prices=prices_with_set,
-                                )
-                            )
-                    await reporter.step_complete("report_generation", report_idx)
-
-            db.commit()
-            return AnalysisResponse(
-                analysis_id=str(analysis.id),
-                cards=card_reports,
-                price_sources=self.pricing.get_enabled_source_names(),
-            )
-        finally:
-            db.close()
+        return await self._resolve_and_price_cards(
+            entries=[(n, None) for n in card_names],
+            price_source_names=price_source_names,
+            step_index_by_id=step_index_by_id,
+            reporter=reporter,
+            source_urls=",".join([str(u) for u in (request.urls or [])]) or None,
+        )
 
     async def analyze_card_names(
         self,
         names: List[str],
         progress: Optional[ProgressReporter] = None,
     ) -> AnalysisResponse:
-        """
-        Analyze card names: each entry is one line, "Name" or "Name, Set".
-        Resolves canonical name via Scryfall, fetches all printings, and reports
-        prices grouped by expansion when available.
-        """
+        """Resolve card names and run the shared price pipeline."""
         entries = self._parse_name_lines(names)
         reporter: ProgressReporter = progress or NoOpProgressReporter()
+
+        price_source_names = self.pricing.get_enabled_source_names()
+        steps = get_steps_for_feature(Feature.CARD_NAMES, price_source_names)
+        step_index_by_id = {s.id: s.index for s in steps}
+        await reporter.start_steps(steps)
+
+        return await self._resolve_and_price_cards(
+            entries=entries,
+            price_source_names=price_source_names,
+            step_index_by_id=step_index_by_id,
+            reporter=reporter,
+            source_urls=None,
+        )
+
+    # ------------------------------------------------------------------
+    # Image → card-name extraction (image-specific logic)
+    # ------------------------------------------------------------------
+
+    async def _extract_names_from_images(
+        self,
+        image_bytes: List[bytes],
+        step_index_by_id: Dict[str, int],
+        reporter: ProgressReporter,
+    ) -> List[str]:
+        """Return a flat list of recognised card names from raw image bytes."""
+        if self.card_name_extractor:
+            logger.info("image analysis: using extraction service for %d image(s)", len(image_bytes))
+            det_idx = step_index_by_id.get("card_detection", 1)
+            await reporter.step_start("card_detection", det_idx, "Card extraction (OCR)")
+            names_per_image = await self.card_name_extractor.extract_names_from_images(image_bytes)
+            await reporter.step_complete("card_detection", det_idx)
+
+            for img_idx, names in enumerate(names_per_image):
+                logger.info(
+                    "image analysis: extraction raw names for image %d: %s",
+                    img_idx, [n for n in names if n and n.strip()],
+                )
+
+            rec_idx = step_index_by_id.get("card_recognition", 2)
+            await reporter.step_start("card_recognition", rec_idx, "Recognizing detected cards")
+            await reporter.step_complete("card_recognition", rec_idx)
+
+            all_names = [name for names in names_per_image for name in names if name and name.strip()]
+            logger.info(
+                "image analysis: extraction returned %d card name(s) (per image: %s), resolving via Scryfall",
+                len(all_names), [len(n) for n in names_per_image],
+            )
+            return all_names
+
+        det_idx = step_index_by_id.get("card_detection", 1)
+        rec_idx = step_index_by_id.get("card_recognition", 2)
+        all_names: List[str] = []
+        for img in image_bytes:
+            await reporter.step_start("card_detection", det_idx, "Detecting cards in image")
+            detections = self.detector.detect_cards(img)
+            await reporter.step_complete("card_detection", det_idx)
+            if not detections:
+                continue
+
+            await reporter.step_start("card_recognition", rec_idx, "Recognizing detected cards")
+            crops: List[bytes] = []
+            for det in detections:
+                _, buf = cv2.imencode(".png", det.image)
+                crops.append(buf.tobytes())
+            rec_results = await self.recognizer.recognize_cards(crops)
+            await reporter.step_complete("card_recognition", rec_idx)
+
+            all_names.extend(rec.card_name for rec in rec_results if getattr(rec, "card_name", None))
+
+        return all_names
+
+    # ------------------------------------------------------------------
+    # Shared resolve → price → persist pipeline
+    # ------------------------------------------------------------------
+
+    async def _resolve_and_price_cards(
+        self,
+        entries: List[Tuple[str, Optional[str]]],
+        price_source_names: List[str],
+        step_index_by_id: Dict[str, int],
+        reporter: ProgressReporter,
+        source_urls: Optional[str],
+    ) -> AnalysisResponse:
+        """
+        Core pipeline shared by every feature.
+
+        *entries* is a list of ``(card_name, set_hint | None)`` tuples.
+        """
         db = SessionLocal()
         try:
-            analysis = Analysis(source_urls=None)
+            analysis = Analysis(source_urls=source_urls)
             db.add(analysis)
             db.flush()
 
             card_reports: List[CardReportItem] = []
             seen_canonical: set = set()
 
-            price_source_names = self.pricing.get_enabled_source_names()
-            steps = get_steps_for_feature(Feature.CARD_NAMES, price_source_names)
-            step_index_by_id = {s.id: s.index for s in steps}
-            await reporter.start_steps(steps)
-
-            for line_name, set_hint in entries:
+            for entry_idx, (line_name, set_hint) in enumerate(entries):
                 scryfall_idx = step_index_by_id.get("scryfall_normalize", 0)
                 await reporter.step_start(
                     "scryfall_normalize", scryfall_idx, f"Resolving '{line_name}' via Scryfall"
                 )
+                await reporter.progress("scryfall_normalize", entry_idx + 1, len(entries))
                 cards = await self.name_resolver.resolve(line_name, set_hint=set_hint)
                 if not cards:
                     await reporter.step_complete("scryfall_normalize", scryfall_idx)
@@ -434,15 +286,14 @@ class AnalysisService:
 
                         card = db.query(Card).filter_by(scryfall_id=sid).one_or_none()
                         if card is None:
-                            image_uris = printing.get("image_uris") or {}
                             card = Card(
                                 scryfall_id=sid,
                                 name=printing.get("name", canonical_name),
                                 set_code=printing.get("set"),
                                 set_name=printing.get("set_name"),
                                 collector_number=col_num,
-                                image_url=image_uris.get("normal"),
-                                thumbnail_url=image_uris.get("small") or image_uris.get("normal"),
+                                image_url=print_image_url,
+                                thumbnail_url=print_thumb_url,
                             )
                             db.add(card)
                             db.flush()
@@ -500,6 +351,10 @@ class AnalysisService:
         finally:
             db.close()
 
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
     @staticmethod
     def _parse_name_lines(names: List[str]) -> List[tuple]:
         """Parse list of lines into (card_name, set_hint). One line = one card; 'Name, Set' allowed."""
@@ -517,4 +372,3 @@ class AnalysisService:
             else:
                 out.append((line, None))
         return out
-
