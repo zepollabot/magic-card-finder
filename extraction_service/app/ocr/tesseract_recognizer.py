@@ -1,55 +1,77 @@
-"""Tesseract-based card title OCR with preprocessing."""
-from typing import Union
+"""Tesseract-based card title OCR."""
 
 import logging
 import os
 import uuid
+from typing import Union
 
 import cv2
 import numpy as np
 import pytesseract
 
+from .protocols import TitleRegionExtractor
+
 DEFAULT_LANGS = "eng+ita+fra+spa+deu"
 
-TITLE_ZONE_TOP = 0.04
-TITLE_ZONE_BOTTOM = 0.15
-HORIZONTAL_INSET = 0.05
-
-CARD_HEIGHT = 936
-CARD_WIDTH = 672
-
-UPSCALE = 3
-BORDER_PX = 20
-
-
 logger = logging.getLogger(__name__)
+
+_TRAILING_JUNK_RE = None
+
+
+def _trailing_junk_re():
+    """Lazy-compiled regex that strips trailing mana-cost / OCR noise.
+
+    Repeatedly removes trailing tokens that are:
+      - purely non-alphabetic (numbers, symbols, punctuation), or
+      - 1-2 characters long (likely OCR artefacts from mana symbols).
+    """
+    global _TRAILING_JUNK_RE
+    if _TRAILING_JUNK_RE is None:
+        import re
+
+        _TRAILING_JUNK_RE = re.compile(
+            r"(?:\s+(?:[^\s]{1,2}|[^A-Za-zÀ-ÿ\s]+))+$"
+        )
+    return _TRAILING_JUNK_RE
+
+
+def _pick_best_line(text: str) -> str:
+    """When Tesseract reads noise lines from dark border rows, the actual
+    card title is typically the line with the most consecutive letters.
+    Pick the line that looks most like a real card name.
+    """
+    import re
+
+    lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+    if len(lines) <= 1:
+        return text.strip()
+
+    def _score(line: str) -> int:
+        alpha_runs = re.findall(r"[A-Za-zÀ-ÿ]{2,}", line)
+        return sum(len(r) for r in alpha_runs)
+
+    best = max(lines, key=_score)
+    return best
 
 
 class TesseractCardRecognizer:
     """
-    Preprocesses card image, crops the title zone, and runs Tesseract
-    with multi-language support (PSM 7, single text line).
+    Runs Tesseract on a pre-extracted title region.
+
+    Preprocessing is delegated to a ``TitleRegionExtractor`` (SRP / DIP),
+    so this class only owns OCR invocation and result cleaning.
     """
 
-    def __init__(self, lang: str = DEFAULT_LANGS) -> None:
+    def __init__(
+        self,
+        title_extractor: TitleRegionExtractor,
+        lang: str = DEFAULT_LANGS,
+    ) -> None:
         self.lang = lang
-        # When true, log raw / cleaned outputs for each Tesseract config.
+        self._title_extractor = title_extractor
         self._debug_tesseract = bool(os.getenv("OCR_DEBUG_TESSERACT", "").strip())
-        base_whitelist = os.getenv(
-            "TESSERACT_TITLE_WHITELIST",
-            "0123456789"
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-            "abcdefghijklmnopqrstuvwxyz"
-            " ,.'-",
-        )
-        self._tess_configs = [
-            # Original, un-whitelisted config (kept first because it worked well
-            # on many titles, including clean ones like the debug samples).
-            "--psm 7 --oem 3",
-            # Stricter configs that can help on noisier scans.
-            f"--psm 7 --oem 3 -c tessedit_char_whitelist={base_whitelist}",
-            f"--psm 6 --oem 3 -c tessedit_char_whitelist={base_whitelist}",
-        ]
+
+        self._tess_config = "--psm 6 --oem 3"
 
     def recognize(self, card_image: Union[bytes, np.ndarray]) -> str:
         if isinstance(card_image, bytes):
@@ -59,117 +81,64 @@ class TesseractCardRecognizer:
             img = card_image
         if img is None:
             return ""
-        roi = self._crop_title_zone(img)
-        preprocessed = self._preprocess(roi)
 
-        # Optional debug: dump ROI and preprocessed image to disk when
-        # OCR_DEBUG_DIR is set (e.g. "/tmp/ocr-debug").
-        debug_dir = os.getenv("OCR_DEBUG_DIR", "").strip()
-        if debug_dir:
-            try:
-                os.makedirs(debug_dir, exist_ok=True)
-                suffix = uuid.uuid4().hex[:8]
-                roi_path = os.path.join(debug_dir, f"title_roi_{suffix}.png")
-                pre_path = os.path.join(debug_dir, f"title_preprocessed_{suffix}.png")
-                cv2.imwrite(roi_path, roi)
-                cv2.imwrite(pre_path, preprocessed)
-            except Exception:
-                # Debugging helper – failures here must not break OCR.
-                pass
+        preprocessed, roi = self._title_extractor.extract(img)
+        self._save_debug(roi, preprocessed)
 
-        cleaned = self._run_tesseract(preprocessed)
-        logger.debug(
-            "tesseract recognizer: cleaned=%r (empty=%s)",
-            cleaned,
-            not bool(cleaned),
-        )
-        return cleaned
-
-    def _crop_title_zone(self, img: np.ndarray) -> np.ndarray:
-        h, w = img.shape[:2]
-        y_start = max(0, int(h * TITLE_ZONE_TOP))
-        y_end = max(y_start + 1, int(h * TITLE_ZONE_BOTTOM))
-        x_start = max(0, int(w * HORIZONTAL_INSET))
-        x_end = max(x_start + 1, w - int(w * HORIZONTAL_INSET))
-        return img[y_start:y_end, x_start:x_end]
-
-    def _preprocess(self, roi: np.ndarray) -> np.ndarray:
-        h, w = roi.shape[:2]
-        scaled = cv2.resize(
-            roi, (w * UPSCALE, h * UPSCALE), interpolation=cv2.INTER_CUBIC
-        )
-        gray = cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY)
-
-        # Heuristic: if the image is already almost pure black/white (like our
-        # preprocessed debug strips), avoid heavy filtering which can break
-        # thin glyphs. We detect this by measuring how many pixels are very
-        # dark or very light.
-        total = gray.size
-        if total == 0:
-            return gray
-        dark = (gray <= 30).sum()
-        light = (gray >= 225).sum()
-        bw_ratio = (dark + light) / float(total)
-
-        if bw_ratio > 0.9:
-            # Minimal preprocessing: keep existing binary structure, just close
-            # small gaps and add a border.
-            binary = gray
-        else:
-            denoised = cv2.medianBlur(gray, 3)
-            binary = cv2.adaptiveThreshold(
-                denoised,
-                255,
-                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                cv2.THRESH_BINARY,
-                31,
-                10,
-            )
-
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
-
-        padded = cv2.copyMakeBorder(
-            binary,
-            BORDER_PX, BORDER_PX, BORDER_PX, BORDER_PX,
-            cv2.BORDER_CONSTANT,
-            value=255,
-        )
-        return padded
+        text = self._run_tesseract(preprocessed)
+        logger.debug("tesseract: result=%r", text)
+        return text
 
     def _run_tesseract(self, preprocessed: np.ndarray) -> str:
-        """
-        Run Tesseract with a couple of configs and pick the best result.
-        Heuristic: prefer the longest non-empty cleaned string.
-        """
-        best: str = ""
-        for cfg in self._tess_configs:
-            try:
-                raw = pytesseract.image_to_string(
-                    preprocessed,
-                    lang=self.lang,
-                    config=cfg,
-                )
-            except Exception:
-                continue
-            cleaned = self._clean_text(raw)
-            if self._debug_tesseract:
-                # Log a short preview to avoid huge lines.
-                preview = cleaned[:80]
-                logger.debug(
-                    "tesseract cfg=%r raw_len=%d cleaned_preview=%r",
-                    cfg,
-                    len(raw or ""),
-                    preview,
-                )
-            if cleaned and len(cleaned) > len(best):
-                best = cleaned
-        return best
+        try:
+            raw = pytesseract.image_to_string(
+                preprocessed,
+                lang=self.lang,
+                config=self._tess_config,
+            )
+        except Exception:
+            logger.exception("tesseract: OCR failed")
+            return ""
+
+        cleaned = self._clean_text(raw)
+        if self._debug_tesseract:
+            logger.debug(
+                "tesseract cfg=%r raw_len=%d cleaned=%r",
+                self._tess_config,
+                len(raw or ""),
+                cleaned[:80],
+            )
+        return cleaned
+
+    def _save_debug(self, original: np.ndarray, preprocessed: np.ndarray) -> None:
+        debug_dir = os.getenv("OCR_DEBUG_DIR", "").strip()
+        if not debug_dir:
+            return
+        try:
+            os.makedirs(debug_dir, exist_ok=True)
+            suffix = uuid.uuid4().hex[:8]
+            cv2.imwrite(os.path.join(debug_dir, f"title_roi_{suffix}.png"), original)
+            cv2.imwrite(
+                os.path.join(debug_dir, f"title_preprocessed_{suffix}.png"),
+                preprocessed,
+            )
+        except Exception:
+            pass
 
     @staticmethod
     def _clean_text(text: str) -> str:
         if not text:
             return ""
-        one_line = " ".join(text.split())
-        return one_line.strip()
+        import re
 
+        line = _pick_best_line(text)
+        cleaned = " ".join(line.split()).strip()
+        cleaned = _trailing_junk_re().sub("", cleaned)
+        # Strip leading 1-2 char tokens or purely non-alpha tokens.
+        cleaned = re.sub(
+            r"^(?:[^\s]{1,2}\s+|[^A-Za-zÀ-ÿ\s]+\s*)+", "", cleaned,
+        )
+        # Strip leading non-alpha characters glued to the first word.
+        cleaned = re.sub(r"^[^A-Za-zÀ-ÿ]+", "", cleaned)
+        cleaned = cleaned.strip()
+        return cleaned

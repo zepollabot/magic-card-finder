@@ -9,7 +9,7 @@ from .api.routes import router as v1_router
 from .api.schemas import ErrorResponse
 from .detection import OpenCVCardDetector
 from .extract import ExtractCardNamesService
-from .ocr import TesseractCardRecognizer
+from .ocr import CardTitleRegionExtractor, TesseractCardRecognizer
 
 _log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -41,8 +41,12 @@ def _parse_worker_threads() -> int | None:
 @app.on_event("startup")
 def startup():
     detector = OpenCVCardDetector()
+    title_extractor = CardTitleRegionExtractor()
     tess_langs = os.getenv("TESSERACT_LANGS", "").strip() or None
-    recognizer = TesseractCardRecognizer(**({"lang": tess_langs} if tess_langs else {}))
+    recognizer = TesseractCardRecognizer(
+        title_extractor=title_extractor,
+        **({"lang": tess_langs} if tess_langs else {}),
+    )
     max_workers = _parse_worker_threads()
     app.state.extract_service = ExtractCardNamesService(
         detector, recognizer, max_workers=max_workers
