@@ -25,23 +25,15 @@ export function StatusBar({ steps, stepStatuses, status, message, subProgress }:
 
   const activeStep = steps.find((s) => stepStatuses[s.id] === "active");
 
+  const borderColor =
+    status === "error" ? "#dc3545" : status === "done" ? "#198754" : "#0d6efd";
+
   return (
     <div
-      style={{
-        position: "fixed",
-        bottom: 0,
-        left: 0,
-        right: 0,
-        zIndex: 1050,
-        background: "linear-gradient(to top, rgba(255,255,255,1) 80%, rgba(255,255,255,0.95))",
-        borderTop: "1px solid #dee2e6",
-        boxShadow: "0 -4px 24px rgba(0,0,0,0.08)",
-        padding: "12px 0 14px",
-        transition: "transform 0.3s ease",
-        transform: status === "idle" ? "translateY(100%)" : "translateY(0)",
-      }}
+      className="card shadow-sm mb-4"
+      style={{ borderLeft: `3px solid ${borderColor}` }}
     >
-      <div className="container">
+      <div className="card-body py-3 px-4">
         <div className="d-flex align-items-center justify-content-between mb-2">
           <div className="d-flex align-items-center gap-2">
             {status === "running" && (
@@ -90,7 +82,7 @@ export function StatusBar({ steps, stepStatuses, status, message, subProgress }:
             style={{
               width: `${progressPercent}%`,
               transition: "width 0.4s ease",
-              backgroundColor: status === "error" ? "#dc3545" : status === "done" ? "#198754" : "#0d6efd",
+              backgroundColor: borderColor,
             }}
           />
         </div>

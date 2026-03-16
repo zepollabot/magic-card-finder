@@ -422,6 +422,14 @@ function App() {
           </div>
         </div>
 
+        <StatusBar
+          steps={steps}
+          stepStatuses={stepStatuses}
+          status={statusState}
+          message={statusMessage}
+          subProgress={subProgress}
+        />
+
         {report && (
           <div className="card shadow-sm border-0">
             <div className="card-header bg-white py-3">
@@ -539,14 +547,6 @@ function App() {
           </div>
         )}
       </main>
-
-      <StatusBar
-        steps={steps}
-        stepStatuses={stepStatuses}
-        status={statusState}
-        message={statusMessage}
-        subProgress={subProgress}
-      />
 
       {thumbnailZoom &&
         createPortal(
