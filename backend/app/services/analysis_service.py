@@ -1,6 +1,5 @@
 from typing import Dict, List, Optional, Tuple
 
-import cv2
 import logging
 
 from ..db import SessionLocal
@@ -9,9 +8,8 @@ logger = logging.getLogger(__name__)
 from ..models import Analysis, AnalysisCard, AnalysisPrice, Card
 from ..schemas import AnalyzeRequest, AnalysisResponse, CardReportItem, CardPriceInfo
 from .image_ingest import ImageIngestService
-from .card_detection import CardDetectionService
-from .card_recognition import CardRecognitionService
-from .card_name_extractor import CardNameExtractor
+from .detector_service_client import DetectorClient
+from .ocr_service_client import OcrClient
 from .scryfall_client import ScryfallClient
 from .pricing_aggregator import PricingAggregator
 from .progress import ProgressReporter, NoOpProgressReporter
@@ -23,27 +21,28 @@ class AnalysisService:
     """
     Application service that orchestrates image-based and name-based analyses.
 
+    Detection and OCR are handled by two independent microservices,
+    accessed through protocol abstractions (DIP).
+
     All features converge on the same resolve-price-persist pipeline via
     ``_resolve_and_price_cards``, so the pricing logic is never duplicated.
     """
 
     def __init__(
         self,
+        detector_client: DetectorClient,
+        ocr_client: OcrClient,
         image_ingest: Optional[ImageIngestService] = None,
-        detector: Optional[CardDetectionService] = None,
-        recognizer: Optional[CardRecognitionService] = None,
         scryfall: Optional[ScryfallClient] = None,
         pricing: Optional[PricingAggregator] = None,
         name_resolver: Optional[CardNameResolver] = None,
-        card_name_extractor: Optional[CardNameExtractor] = None,
     ) -> None:
+        self.detector_client = detector_client
+        self.ocr_client = ocr_client
         self.image_ingest = image_ingest or ImageIngestService()
-        self.detector = detector or CardDetectionService()
-        self.recognizer = recognizer or CardRecognitionService()
         self.scryfall = scryfall or ScryfallClient()
         self.pricing = pricing or PricingAggregator()
         self.name_resolver = name_resolver or ScryfallCardNameResolver(self.scryfall)
-        self.card_name_extractor = card_name_extractor
 
     # ------------------------------------------------------------------
     # Public entry points
@@ -122,51 +121,38 @@ class AnalysisService:
         step_index_by_id: Dict[str, int],
         reporter: ProgressReporter,
     ) -> List[str]:
-        """Return a flat list of recognised card names from raw image bytes."""
-        if self.card_name_extractor:
-            logger.info("image analysis: using extraction service for %d image(s)", len(image_bytes))
-            det_idx = step_index_by_id.get("card_detection", 1)
-            await reporter.step_start("card_detection", det_idx, "Card extraction (OCR)")
-            names_per_image = await self.card_name_extractor.extract_names_from_images(image_bytes)
-            await reporter.step_complete("card_detection", det_idx)
+        """Return a flat list of recognised card names from raw image bytes.
 
-            for img_idx, names in enumerate(names_per_image):
-                logger.info(
-                    "image analysis: extraction raw names for image %d: %s",
-                    img_idx, [n for n in names if n and n.strip()],
-                )
-
-            rec_idx = step_index_by_id.get("card_recognition", 2)
-            await reporter.step_start("card_recognition", rec_idx, "Recognizing detected cards")
-            await reporter.step_complete("card_recognition", rec_idx)
-
-            all_names = [name for names in names_per_image for name in names if name and name.strip()]
-            logger.info(
-                "image analysis: extraction returned %d card name(s) (per image: %s), resolving via Scryfall",
-                len(all_names), [len(n) for n in names_per_image],
-            )
-            return all_names
-
+        Orchestrates the detector service (YOLO) then the OCR service
+        (Tesseract) as two independent steps with real progress reporting.
+        """
         det_idx = step_index_by_id.get("card_detection", 1)
-        rec_idx = step_index_by_id.get("card_recognition", 2)
-        all_names: List[str] = []
-        for img in image_bytes:
-            await reporter.step_start("card_detection", det_idx, "Detecting cards in image")
-            detections = self.detector.detect_cards(img)
-            await reporter.step_complete("card_detection", det_idx)
-            if not detections:
-                continue
+        await reporter.step_start("card_detection", det_idx, "Detecting card names")
+        detection_results = await self.detector_client.detect(image_bytes)
+        await reporter.step_complete("card_detection", det_idx)
 
-            await reporter.step_start("card_recognition", rec_idx, "Recognizing detected cards")
-            crops: List[bytes] = []
-            for det in detections:
-                _, buf = cv2.imencode(".png", det.image)
-                crops.append(buf.tobytes())
-            rec_results = await self.recognizer.recognize_cards(crops)
+        all_crops: List[bytes] = []
+        for det_result in detection_results:
+            for crop in det_result.name_crops:
+                all_crops.append(crop.image_bytes)
+
+        if not all_crops:
+            rec_idx = step_index_by_id.get("card_recognition", 2)
+            await reporter.step_start("card_recognition", rec_idx, "Reading card names")
             await reporter.step_complete("card_recognition", rec_idx)
+            return []
 
-            all_names.extend(rec.card_name for rec in rec_results if getattr(rec, "card_name", None))
+        rec_idx = step_index_by_id.get("card_recognition", 2)
+        await reporter.step_start("card_recognition", rec_idx, "Reading card names")
+        recognized_texts = await self.ocr_client.recognize(all_crops)
+        await reporter.step_complete("card_recognition", rec_idx)
 
+        all_names = [text for text in recognized_texts if text and text.strip()]
+        logger.info(
+            "image analysis: %d crop(s) -> %d name(s) recognized",
+            len(all_crops),
+            len(all_names),
+        )
         return all_names
 
     # ------------------------------------------------------------------

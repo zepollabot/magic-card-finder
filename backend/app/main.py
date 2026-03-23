@@ -11,8 +11,6 @@ from pydantic import ValidationError
 import base64
 import json
 
-import cv2
-
 from .db import SessionLocal, Base, engine
 from .models import Analysis, AnalysisCard, AnalysisPrice, Card, Price
 from .schemas import (
@@ -24,7 +22,8 @@ from .schemas import (
     StepInfo,
 )
 from .services.analysis_service import AnalysisService
-from .services.card_name_extractor import ExtractionServiceClient
+from .services.detector_service_client import DetectorServiceClient
+from .services.ocr_service_client import OcrServiceClient
 from .services.price_sources import get_enabled_price_source_names
 from .services.step_definitions import Feature, get_steps_for_feature
 from .services.progress import WebSocketProgressReporter
@@ -67,25 +66,28 @@ async def lifespan(app: FastAPI):
                 raise
             time.sleep(2)
 
-    extraction_url = os.getenv("EXTRACTION_SERVICE_URL", "").strip()
-    if extraction_url:
-        http_client = httpx.AsyncClient()
-        extractor = ExtractionServiceClient(http_client, base_url=extraction_url)
-        app.state.card_name_extractor = extractor
-        app.state._extraction_http_client = http_client
-        _app_services_logger.info(
-            "extraction service: client configured (url=%s, timeout=%.0fs)",
-            extraction_url,
-            extractor._timeout,
-        )
-    else:
-        app.state.card_name_extractor = None
-        app.state._extraction_http_client = None
+    detector_url = os.getenv("DETECTOR_SERVICE_URL", "").strip()
+    ocr_url = os.getenv("OCR_SERVICE_URL", "").strip()
+
+    http_client = httpx.AsyncClient()
+    app.state._http_client = http_client
+
+    app.state.detector_client = DetectorServiceClient(
+        client=http_client, base_url=detector_url or "http://detector:8002"
+    )
+    app.state.ocr_client = OcrServiceClient(
+        client=http_client, base_url=ocr_url or "http://ocr:8003"
+    )
+    _app_services_logger.info(
+        "pipeline clients configured (detector=%s, ocr=%s)",
+        detector_url or "http://detector:8002",
+        ocr_url or "http://ocr:8003",
+    )
 
     yield
 
-    if getattr(app.state, "_extraction_http_client", None) is not None:
-        await app.state._extraction_http_client.aclose()
+    if getattr(app.state, "_http_client", None) is not None:
+        await app.state._http_client.aclose()
 
 
 app = FastAPI(title="Magic Card Finder API", lifespan=lifespan)
@@ -105,8 +107,10 @@ async def health() -> dict:
 
 
 def get_analysis_service(request: Request) -> AnalysisService:
-    extractor = getattr(request.app.state, "card_name_extractor", None)
-    return AnalysisService(card_name_extractor=extractor)
+    return AnalysisService(
+        detector_client=request.app.state.detector_client,
+        ocr_client=request.app.state.ocr_client,
+    )
 
 
 @app.get("/steps", response_model=List[StepInfo])
@@ -149,8 +153,10 @@ async def analyze_names(body: AnalyzeNamesRequest, service: AnalysisService = De
 async def analyze_ws(websocket: WebSocket):
     await websocket.accept()
     reporter = WebSocketProgressReporter(websocket)
-    extractor = getattr(websocket.app.state, "card_name_extractor", None)
-    service = AnalysisService(card_name_extractor=extractor)
+    service = AnalysisService(
+        detector_client=websocket.app.state.detector_client,
+        ocr_client=websocket.app.state.ocr_client,
+    )
 
     try:
         raw = await websocket.receive_text()

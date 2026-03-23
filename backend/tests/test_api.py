@@ -9,7 +9,23 @@ from app.schemas import AnalyzeRequest, AnalysisResponse
 from app.services.analysis_service import AnalysisService
 
 
+class FakeDetectorClient:
+    async def detect(self, images):
+        return []
+
+
+class FakeOcrClient:
+    async def recognize(self, images):
+        return []
+
+
 class FakeAnalysisService(AnalysisService):
+    def __init__(self):
+        super().__init__(
+            detector_client=FakeDetectorClient(),
+            ocr_client=FakeOcrClient(),
+        )
+
     async def analyze_images_and_urls(
         self, request: AnalyzeRequest, file_bytes: List[bytes], *args, **kwargs
     ) -> AnalysisResponse:
@@ -37,6 +53,8 @@ def override_analysis_service(monkeypatch: pytest.MonkeyPatch):
         return FakeAnalysisService()
 
     app.dependency_overrides[get_analysis_service] = _get_fake
+    app.state.detector_client = FakeDetectorClient()
+    app.state.ocr_client = FakeOcrClient()
     yield
     app.dependency_overrides.clear()
 

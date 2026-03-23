@@ -6,7 +6,7 @@ import pytest
 
 from app.schemas import AnalyzeRequest, AnalysisResponse
 from app.services.analysis_service import AnalysisService
-from app.services.card_name_extractor import CardNameExtractor
+from app.services.detector_service_client import DetectionResult, NameCrop
 from app.services.card_name_resolver import CardNameResolver
 from app.services.pricing_aggregator import PricingAggregator
 from app.services.scryfall_client import ScryfallClient
@@ -15,6 +15,22 @@ from app.services.scryfall_client import ScryfallClient
 # ---------------------------------------------------------------------------
 # Fakes
 # ---------------------------------------------------------------------------
+
+class FakeDetectorClient:
+    def __init__(self, results=None):
+        self._results = results or []
+
+    async def detect(self, images):
+        return self._results
+
+
+class FakeOcrClient:
+    def __init__(self, texts=None):
+        self._texts = texts or []
+
+    async def recognize(self, images):
+        return self._texts
+
 
 class FakeResolver(CardNameResolver):
     def __init__(self, mapping: Dict[str, List[Dict[str, Any]]]) -> None:
@@ -44,35 +60,12 @@ class FakeScryfallClient(ScryfallClient):
         return self._printings_map.get(exact_name, [])
 
 
-class FakeExtractor(CardNameExtractor):
-    """Returns fixed names per image for testing."""
-
-    def __init__(self, names_per_image: List[List[str]]) -> None:
-        self.names_per_image = names_per_image
-
-    async def extract_names_from_images(self, images: List[bytes]) -> List[List[str]]:
-        return self.names_per_image[: len(images)]
-
-
 def _stub_db():
     """Patch SessionLocal to return an in-memory mock that accepts ORM calls."""
     db = MagicMock()
     db.query.return_value.filter_by.return_value.one_or_none.return_value = None
 
-    mock_analysis = MagicMock()
-    mock_analysis.id = 42
-    mock_card = MagicMock()
-    mock_card.id = 1
-    mock_card.name = "stub"
-    mock_card.set_name = None
-    mock_card.collector_number = None
-    mock_card.image_url = None
-    mock_card.thumbnail_url = None
-    mock_ac = MagicMock()
-    mock_ac.id = 1
-
     call_count = {"n": 0}
-    original_add = db.add
 
     def _track_add(obj):
         call_count["n"] += 1
@@ -81,6 +74,23 @@ def _stub_db():
 
     db.add.side_effect = _track_add
     return db
+
+
+def _make_service(
+    resolver_map=None,
+    scryfall_map=None,
+    detector_results=None,
+    ocr_texts=None,
+):
+    resolver = FakeResolver(resolver_map or {})
+    scryfall = FakeScryfallClient(scryfall_map or {})
+    return AnalysisService(
+        detector_client=FakeDetectorClient(detector_results),
+        ocr_client=FakeOcrClient(ocr_texts),
+        name_resolver=resolver,
+        pricing=FakePricing(),
+        scryfall=scryfall,
+    ), resolver
 
 
 # ---------------------------------------------------------------------------
@@ -102,12 +112,9 @@ ISLAND = {"name": "Island", "id": "island-1", "set": "2ed", "set_name": "Unlimit
 async def test_analyze_card_names_uses_resolver_and_handles_success(mock_session_local):
     mock_session_local.return_value = _stub_db()
 
-    resolver = FakeResolver({"Tarmogoyf": [TARMOGOYF]})
-    scryfall = FakeScryfallClient({"Tarmogoyf": [TARMOGOYF]})
-    service = AnalysisService(
-        name_resolver=resolver,
-        pricing=FakePricing(),
-        scryfall=scryfall,
+    service, resolver = _make_service(
+        resolver_map={"Tarmogoyf": [TARMOGOYF]},
+        scryfall_map={"Tarmogoyf": [TARMOGOYF]},
     )
 
     result: AnalysisResponse = await service.analyze_card_names(["Tarmogoyf"])
@@ -123,12 +130,9 @@ async def test_analyze_card_names_uses_resolver_and_handles_success(mock_session
 async def test_analyze_card_names_with_set_hint(mock_session_local):
     mock_session_local.return_value = _stub_db()
 
-    resolver = FakeResolver({"Lightning Bolt": [BOLT]})
-    scryfall = FakeScryfallClient({"Lightning Bolt": [BOLT]})
-    service = AnalysisService(
-        name_resolver=resolver,
-        pricing=FakePricing(),
-        scryfall=scryfall,
+    service, resolver = _make_service(
+        resolver_map={"Lightning Bolt": [BOLT]},
+        scryfall_map={"Lightning Bolt": [BOLT]},
     )
 
     result = await service.analyze_card_names(["Lightning Bolt, Unlimited Edition"])
@@ -143,12 +147,9 @@ async def test_analyze_card_names_with_set_hint(mock_session_local):
 async def test_analyze_card_names_deduplicates_canonical(mock_session_local):
     mock_session_local.return_value = _stub_db()
 
-    resolver = FakeResolver({"Tarmogoyf": [TARMOGOYF]})
-    scryfall = FakeScryfallClient({"Tarmogoyf": [TARMOGOYF]})
-    service = AnalysisService(
-        name_resolver=resolver,
-        pricing=FakePricing(),
-        scryfall=scryfall,
+    service, _ = _make_service(
+        resolver_map={"Tarmogoyf": [TARMOGOYF]},
+        scryfall_map={"Tarmogoyf": [TARMOGOYF]},
     )
 
     result = await service.analyze_card_names(["Tarmogoyf", "Tarmogoyf"])
@@ -161,13 +162,7 @@ async def test_analyze_card_names_deduplicates_canonical(mock_session_local):
 async def test_analyze_card_names_unresolvable_returns_empty(mock_session_local):
     mock_session_local.return_value = _stub_db()
 
-    resolver = FakeResolver({})
-    scryfall = FakeScryfallClient({})
-    service = AnalysisService(
-        name_resolver=resolver,
-        pricing=FakePricing(),
-        scryfall=scryfall,
-    )
+    service, _ = _make_service()
 
     result = await service.analyze_card_names(["NonexistentCard"])
 
@@ -182,12 +177,9 @@ async def test_analyze_card_names_multiple_printings(mock_session_local):
     mock_session_local.return_value = _stub_db()
 
     tarmogoyf_mm = {**TARMOGOYF, "id": "id-2", "set": "mma", "set_name": "Modern Masters"}
-    resolver = FakeResolver({"Tarmogoyf": [TARMOGOYF]})
-    scryfall = FakeScryfallClient({"Tarmogoyf": [TARMOGOYF, tarmogoyf_mm]})
-    service = AnalysisService(
-        name_resolver=resolver,
-        pricing=FakePricing(),
-        scryfall=scryfall,
+    service, _ = _make_service(
+        resolver_map={"Tarmogoyf": [TARMOGOYF]},
+        scryfall_map={"Tarmogoyf": [TARMOGOYF, tarmogoyf_mm]},
     )
 
     result = await service.analyze_card_names(["Tarmogoyf"])
@@ -200,25 +192,25 @@ async def test_analyze_card_names_multiple_printings(mock_session_local):
 
 @pytest.mark.asyncio
 @patch("app.services.analysis_service.SessionLocal")
-async def test_analyze_images_with_extractor_uses_extractor_and_resolver(mock_session_local):
-    """When card_name_extractor is set, images are sent to extractor;
-    extracted names are resolved through the same shared pipeline."""
+async def test_analyze_images_with_detector_and_ocr(mock_session_local):
+    """Images go through detector then OCR; recognized names are resolved."""
     mock_session_local.return_value = _stub_db()
 
-    resolver = FakeResolver({
-        "Lightning Bolt": [BOLT],
-        "Island": [ISLAND],
-    })
-    scryfall = FakeScryfallClient({
-        "Lightning Bolt": [BOLT],
-        "Island": [ISLAND],
-    })
-    extractor = FakeExtractor([["Lightning Bolt", "Island"]])
-    service = AnalysisService(
-        name_resolver=resolver,
-        pricing=FakePricing(),
-        scryfall=scryfall,
-        card_name_extractor=extractor,
+    detector_results = [
+        DetectionResult(
+            image_index=0,
+            name_crops=[
+                NameCrop(bbox=(10, 20, 50, 60), confidence=0.9, image_bytes=b"crop1"),
+                NameCrop(bbox=(70, 20, 110, 60), confidence=0.8, image_bytes=b"crop2"),
+            ],
+        ),
+    ]
+    ocr_texts = ["Lightning Bolt", "Island"]
+    service, resolver = _make_service(
+        resolver_map={"Lightning Bolt": [BOLT], "Island": [ISLAND]},
+        scryfall_map={"Lightning Bolt": [BOLT], "Island": [ISLAND]},
+        detector_results=detector_results,
+        ocr_texts=ocr_texts,
     )
     request = AnalyzeRequest(urls=None)
     result = await service.analyze_images_and_urls(request, [b"fake_image_bytes"])
@@ -232,18 +224,26 @@ async def test_analyze_images_with_extractor_uses_extractor_and_resolver(mock_se
 
 @pytest.mark.asyncio
 @patch("app.services.analysis_service.SessionLocal")
-async def test_analyze_images_with_extractor_empty_names_skipped(mock_session_local):
-    """Empty or whitespace-only names from the extractor should be skipped."""
+async def test_analyze_images_empty_names_skipped(mock_session_local):
+    """Empty or whitespace-only names from OCR should be skipped."""
     mock_session_local.return_value = _stub_db()
 
-    resolver = FakeResolver({"Lightning Bolt": [BOLT]})
-    scryfall = FakeScryfallClient({"Lightning Bolt": [BOLT]})
-    extractor = FakeExtractor([["Lightning Bolt", "", "  "]])
-    service = AnalysisService(
-        name_resolver=resolver,
-        pricing=FakePricing(),
-        scryfall=scryfall,
-        card_name_extractor=extractor,
+    detector_results = [
+        DetectionResult(
+            image_index=0,
+            name_crops=[
+                NameCrop(bbox=(10, 20, 50, 60), confidence=0.9, image_bytes=b"crop1"),
+                NameCrop(bbox=(70, 20, 110, 60), confidence=0.8, image_bytes=b"crop2"),
+                NameCrop(bbox=(120, 20, 160, 60), confidence=0.7, image_bytes=b"crop3"),
+            ],
+        ),
+    ]
+    ocr_texts = ["Lightning Bolt", "", "  "]
+    service, resolver = _make_service(
+        resolver_map={"Lightning Bolt": [BOLT]},
+        scryfall_map={"Lightning Bolt": [BOLT]},
+        detector_results=detector_results,
+        ocr_texts=ocr_texts,
     )
     request = AnalyzeRequest(urls=None)
     result = await service.analyze_images_and_urls(request, [b"img"])
@@ -259,19 +259,26 @@ async def test_images_and_card_names_produce_same_structure(mock_session_local):
     """Both flows should produce identical report structure for the same card."""
     mock_session_local.return_value = _stub_db()
 
-    def _make_service(extractor=None):
-        return AnalysisService(
-            name_resolver=FakeResolver({"Lightning Bolt": [BOLT]}),
-            pricing=FakePricing(),
-            scryfall=FakeScryfallClient({"Lightning Bolt": [BOLT]}),
-            card_name_extractor=extractor,
-        )
-
-    names_result = await _make_service().analyze_card_names(["Lightning Bolt"])
+    service_names, _ = _make_service(
+        resolver_map={"Lightning Bolt": [BOLT]},
+        scryfall_map={"Lightning Bolt": [BOLT]},
+    )
+    names_result = await service_names.analyze_card_names(["Lightning Bolt"])
 
     mock_session_local.return_value = _stub_db()
-    extractor = FakeExtractor([["Lightning Bolt"]])
-    img_result = await _make_service(extractor).analyze_images_and_urls(
+    detector_results = [
+        DetectionResult(
+            image_index=0,
+            name_crops=[NameCrop(bbox=(10, 20, 50, 60), confidence=0.9, image_bytes=b"crop")],
+        ),
+    ]
+    service_img, _ = _make_service(
+        resolver_map={"Lightning Bolt": [BOLT]},
+        scryfall_map={"Lightning Bolt": [BOLT]},
+        detector_results=detector_results,
+        ocr_texts=["Lightning Bolt"],
+    )
+    img_result = await service_img.analyze_images_and_urls(
         AnalyzeRequest(urls=None), [b"img"],
     )
 

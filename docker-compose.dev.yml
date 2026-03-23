@@ -1,24 +1,37 @@
 services:
-  extraction:
+  detector:
     build:
-      context: ./extraction_service
+      context: ./detector_service
+      dockerfile: Dockerfile
+    shm_size: "2gb"
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL-INFO}
+      - MODEL_PATH=${MODEL_PATH-/app/models/mtg_detector/weights/best.pt}
+      - YOLO_CONFIDENCE=${YOLO_CONFIDENCE-0.4}
+      - DETECTOR_DEBUG_DIR=${DETECTOR_DEBUG_DIR-/tmp/detector-debug}
+      - ROBOFLOW_API_KEY=${ROBOFLOW_API_KEY-}
+    ports:
+      - "8002:8002"
+    volumes:
+      - ./detector_service/app:/app/app
+      - ./data/detector-debug:/tmp/detector-debug
+      - ./detector_service/models:/app/models
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8002", "--reload"]
+
+  ocr:
+    build:
+      context: ./ocr_service
       dockerfile: Dockerfile
     environment:
       - LOG_LEVEL=${LOG_LEVEL-INFO}
-      - WORKER_THREADS=${EXTRACTION_WORKER_THREADS-}
       - TESSERACT_LANGS=${TESSERACT_LANGS-eng+ita+fra+spa+deu}
-      # Optional: write cropped title ROIs and preprocessed images used for
-      # Tesseract OCR to this directory inside the container.
       - OCR_DEBUG_DIR=${OCR_DEBUG_DIR-/tmp/ocr-debug}
-      - OCR_DEBUG_TESSERACT=${OCR_DEBUG_TESSERACT-0}
     ports:
-      - "8001:8001"
+      - "8003:8003"
     volumes:
-      # Hot reload extraction service code
-      - ./extraction_service/app:/app/app
-      # Persist OCR debug images (ROI + preprocessed title bands) on host
+      - ./ocr_service/app:/app/app
       - ./data/ocr-debug:/tmp/ocr-debug
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001", "--reload"]
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8003", "--reload"]
 
   backend:
     build:
@@ -28,9 +41,8 @@ services:
       - .env
     environment:
       - DATABASE_URL=postgresql+psycopg2://postgres:postgres@db:5432/magic_cards
-      - OLLAMA_HOST=${OLLAMA_HOST-http://host.docker.internal:11434}
-      - EXTRACTION_SERVICE_URL=${EXTRACTION_SERVICE_URL-http://extraction:8001}
-      # Optional: pricing/API client logs (INFO or DEBUG)
+      - DETECTOR_SERVICE_URL=${DETECTOR_SERVICE_URL-http://detector:8002}
+      - OCR_SERVICE_URL=${OCR_SERVICE_URL-http://ocr:8003}
       - LOG_LEVEL=${LOG_LEVEL-INFO}
       # Optional price sources (see README "Configuring optional price sources")
       - OPEN_TCG_API_ENABLED=${OPEN_TCG_API_ENABLED-0}
@@ -45,7 +57,6 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # Hot reload: mount app code so uvicorn --reload picks up changes
       - ./backend/app:/app/app
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     depends_on:
@@ -61,9 +72,7 @@ services:
     ports:
       - "5173:5173"
     volumes:
-      # Hot reload: mount source so Vite HMR picks up changes
       - ./frontend:/app
-      # Keep node_modules in container so host mount doesn't overwrite it
       - frontend_node_modules:/app/node_modules
     command: ["sh", "-c", "npm install && npm run dev -- --host 0.0.0.0"]
     depends_on:
@@ -78,8 +87,6 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      # Persist DB data in a host directory for easier inspection/backups
-      # Postgres 18+ expects mount at /var/lib/postgresql (not .../data)
       - ./db-data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
@@ -89,4 +96,3 @@ services:
 
 volumes:
   frontend_node_modules:
-

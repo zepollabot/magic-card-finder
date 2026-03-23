@@ -45,6 +45,27 @@ def test_get_steps_for_feature_scrape_url_includes_scrape_first():
     assert ids[-1] == "report_generation"
 
 
+def test_upload_images_step_labels_yolo_and_ocr():
+    steps = get_steps_for_feature(Feature.UPLOAD_IMAGES, [])
+    by_id = {s.id: s.label for s in steps}
+    assert by_id["card_detection"] == "Detecting card names (YOLO)"
+    assert by_id["card_recognition"] == "Reading card names (OCR)"
+
+
+def test_scrape_url_step_labels_yolo_and_ocr():
+    steps = get_steps_for_feature(Feature.SCRAPE_URL, [])
+    by_id = {s.id: s.label for s in steps}
+    assert by_id["card_detection"] == "Detecting card names (YOLO)"
+    assert by_id["card_recognition"] == "Reading card names (OCR)"
+
+
+def test_no_use_extraction_service_parameter():
+    """Verify that the old dual-label branching is gone."""
+    import inspect
+    sig = inspect.signature(get_steps_for_feature)
+    assert "use_extraction_service" not in sig.parameters
+
+
 @pytest.mark.asyncio
 async def test_websocket_progress_reporter_sends_expected_payloads():
     sent = []

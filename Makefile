@@ -19,9 +19,10 @@ help:
 	@echo "  backend-shell   Open a shell inside the backend container"
 	@echo "  frontend-shell  Open a shell inside the frontend container"
 	@echo "  test-backend    Run backend tests (local python -m pytest)"
-	@echo "  test-extraction Run extraction service tests (local pytest)"
+	@echo "  test-detector   Run detector service tests (local pytest)"
+	@echo "  test-ocr        Run OCR service tests (local pytest)"
 	@echo "  test-frontend   Run frontend tests (local npm / vitest)"
-	@echo "  test            Run backend and frontend tests"
+	@echo "  test            Run all tests"
 	@echo "  lint-backend    Lint backend (if tooling installed)"
 	@echo "  lint-frontend   Lint frontend (if tooling installed)"
 	@echo "  lint            Run all linters"
@@ -68,10 +69,19 @@ test-backend:
 	fi && \
 	. .venv/bin/activate && python -m pytest
 
-test-extraction:
-	@cd extraction_service && \
+test-detector:
+	@cd detector_service && \
 	if [ ! -d ".venv" ]; then \
-	  echo "Creating extraction_service virtualenv"; \
+	  echo "Creating detector_service virtualenv"; \
+	  python -m venv .venv; \
+	  . .venv/bin/activate && pip install --upgrade pip && pip install ".[dev]"; \
+	fi && \
+	. .venv/bin/activate && python -m pytest
+
+test-ocr:
+	@cd ocr_service && \
+	if [ ! -d ".venv" ]; then \
+	  echo "Creating ocr_service virtualenv"; \
 	  python -m venv .venv; \
 	  . .venv/bin/activate && pip install --upgrade pip && pip install ".[dev]"; \
 	fi && \
@@ -80,7 +90,7 @@ test-extraction:
 test-frontend:
 	cd frontend && npm run test:ci
 
-test: test-backend test-frontend
+test: test-backend test-detector test-ocr test-frontend
 
 lint-backend:
 	@if command -v ruff >/dev/null 2>&1; then \

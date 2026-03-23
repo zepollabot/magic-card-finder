@@ -1,14 +1,28 @@
 services:
-  extraction:
+  detector:
     build:
-      context: ./extraction_service
+      context: ./detector_service
       dockerfile: Dockerfile
     environment:
       - LOG_LEVEL=${LOG_LEVEL-INFO}
-      - WORKER_THREADS=${EXTRACTION_WORKER_THREADS-}
+      - MODEL_PATH=${MODEL_PATH-/app/models/mtg_detector/weights/best.pt}
+      - YOLO_CONFIDENCE=${YOLO_CONFIDENCE-0.4}
     ports:
-      - "8001:8001"
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001"]
+      - "8002:8002"
+    volumes:
+      - ./detector_service/models:/app/models
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8002"]
+
+  ocr:
+    build:
+      context: ./ocr_service
+      dockerfile: Dockerfile
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL-INFO}
+      - TESSERACT_LANGS=${TESSERACT_LANGS-eng+ita+fra+spa+deu}
+    ports:
+      - "8003:8003"
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8003"]
 
   backend:
     build:
@@ -18,11 +32,9 @@ services:
       - .env
     environment:
       - DATABASE_URL=postgresql+psycopg2://postgres:postgres@db:5432/magic_cards
-      - OLLAMA_HOST=${OLLAMA_HOST-http://host.docker.internal:11434}
-      - EXTRACTION_SERVICE_URL=${EXTRACTION_SERVICE_URL-http://extraction:8001}
-      # Optional: pricing/API client logs (INFO or DEBUG)
+      - DETECTOR_SERVICE_URL=${DETECTOR_SERVICE_URL-http://detector:8002}
+      - OCR_SERVICE_URL=${OCR_SERVICE_URL-http://ocr:8003}
       - LOG_LEVEL=${LOG_LEVEL-INFO}
-      # Optional price sources (see README "Configuring optional price sources")
       - OPEN_TCG_API_ENABLED=${OPEN_TCG_API_ENABLED-0}
       - OPEN_TCG_API_BASE_URL=${OPEN_TCG_API_BASE_URL-https://tcgtracking.com/tcgapi/v1}
       - CARDMARKET_API_ENABLED=${CARDMARKET_API_ENABLED-0}
@@ -59,12 +71,9 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      # Persist DB data in a host directory for easier inspection/backups
-      # Postgres 18+ expects mount at /var/lib/postgresql (not .../data)
       - ./db-data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 2s
       timeout: 5s
       retries: 5
-
