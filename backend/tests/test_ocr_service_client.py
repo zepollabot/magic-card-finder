@@ -30,7 +30,7 @@ def _make_client(response_data=None, status_code=200, side_effect=None):
 
 def _make_response(texts):
     results = [{"image_index": i, "text": t} for i, t in enumerate(texts)]
-    return {"results": results, "meta": {"processor": "tesseract", "version": "1.0"}}
+    return {"results": results, "meta": {"processor": "easyocr", "version": "1.0"}}
 
 
 class TestOcrServiceClient:

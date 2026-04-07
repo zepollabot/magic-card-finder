@@ -1,20 +1,10 @@
-"""Protocols for OCR (dependency inversion)."""
+"""Protocols for text recognition (dependency inversion)."""
 from typing import Protocol
-
-import numpy as np
-
-
-class Preprocessor(Protocol):
-    """Preprocesses a name-crop image for OCR."""
-
-    def preprocess(self, image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Return ``(preprocessed_for_ocr, original_roi)``."""
-        ...
 
 
 class TextRecognizer(Protocol):
-    """Recognizes card name text from a name-crop image."""
+    """Recognizes card name text from a raw image."""
 
-    def recognize(self, image: np.ndarray) -> str:
+    async def recognize(self, image: bytes) -> str:
         """Return recognized text, or empty string on failure."""
         ...

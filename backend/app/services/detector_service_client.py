@@ -80,6 +80,19 @@ class DetectorServiceClient:
             )
             resp.raise_for_status()
             data = resp.json()
+        except httpx.HTTPStatusError as e:
+            detail = ""
+            try:
+                detail = e.response.text[:500]
+            except Exception:
+                pass
+            logger.warning(
+                "detector service: HTTP %s (%s) — %s",
+                e.response.status_code,
+                e.request.url,
+                detail,
+            )
+            return [DetectionResult(image_index=i) for i in range(len(images))]
         except (httpx.HTTPError, KeyError) as e:
             logger.warning(
                 "detector service: request failed (%s: %s)",

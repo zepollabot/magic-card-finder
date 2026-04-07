@@ -124,7 +124,7 @@ class AnalysisService:
         """Return a flat list of recognised card names from raw image bytes.
 
         Orchestrates the detector service (YOLO) then the OCR service
-        (Tesseract) as two independent steps with real progress reporting.
+        (EasyOCR) as two independent steps with real progress reporting.
         """
         det_idx = step_index_by_id.get("card_detection", 1)
         await reporter.step_start("card_detection", det_idx, "Detecting card names")

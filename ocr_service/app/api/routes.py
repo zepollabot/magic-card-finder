@@ -2,8 +2,6 @@
 import base64
 import logging
 
-import cv2
-import numpy as np
 from fastapi import APIRouter, HTTPException, Request
 
 from .schemas import (
@@ -18,7 +16,7 @@ router = APIRouter()
 
 
 @router.post("/recognize", response_model=RecognizeResponse)
-def recognize(request: Request, body: RecognizeRequest) -> RecognizeResponse:
+async def recognize(request: Request, body: RecognizeRequest) -> RecognizeResponse:
     """Recognize card names from base64-encoded name-crop images."""
     recognizer = getattr(request.app.state, "recognizer", None)
     if recognizer is None:
@@ -27,21 +25,14 @@ def recognize(request: Request, body: RecognizeRequest) -> RecognizeResponse:
     results = []
     for img_idx, b64 in enumerate(body.images):
         try:
-            image_bytes = base64.b64decode(b64)
+            image_bytes = base64.b64decode(b64, validate=True)
         except Exception as e:
             raise HTTPException(
                 status_code=400,
                 detail=f"Invalid base64 at image index {img_idx}: {e!s}",
             ) from e
 
-        np_arr = np.frombuffer(image_bytes, np.uint8)
-        image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-        if image is None:
-            logger.warning("recognize: could not decode image at index %d", img_idx)
-            results.append(RecognizeResultItem(image_index=img_idx, text=""))
-            continue
-
-        text = recognizer.recognize(image)
+        text = await recognizer.recognize(image_bytes)
         results.append(RecognizeResultItem(image_index=img_idx, text=text))
 
     total = sum(1 for r in results if r.text)
@@ -53,5 +44,5 @@ def recognize(request: Request, body: RecognizeRequest) -> RecognizeResponse:
 
     return RecognizeResponse(
         results=results,
-        meta=ResponseMeta(processor="tesseract", version="1.0"),
+        meta=ResponseMeta(processor="ollama", version="1.0"),
     )

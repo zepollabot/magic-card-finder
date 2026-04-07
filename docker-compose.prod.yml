@@ -1,4 +1,11 @@
 services:
+  ollama:
+    image: ollama/ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
   detector:
     build:
       context: ./detector_service
@@ -19,10 +26,13 @@ services:
       dockerfile: Dockerfile
     environment:
       - LOG_LEVEL=${LOG_LEVEL-INFO}
-      - TESSERACT_LANGS=${TESSERACT_LANGS-eng+ita+fra+spa+deu}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL-http://ollama:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL-llava}
     ports:
       - "8003:8003"
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8003"]
+    depends_on:
+      - ollama
 
   backend:
     build:
@@ -77,3 +87,6 @@ services:
       interval: 2s
       timeout: 5s
       retries: 5
+
+volumes:
+  ollama_data:

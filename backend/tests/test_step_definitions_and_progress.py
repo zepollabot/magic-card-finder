@@ -49,14 +49,14 @@ def test_upload_images_step_labels_yolo_and_ocr():
     steps = get_steps_for_feature(Feature.UPLOAD_IMAGES, [])
     by_id = {s.id: s.label for s in steps}
     assert by_id["card_detection"] == "Detecting card names (YOLO)"
-    assert by_id["card_recognition"] == "Reading card names (OCR)"
+    assert by_id["card_recognition"] == "Reading card names (Vision LLM)"
 
 
 def test_scrape_url_step_labels_yolo_and_ocr():
     steps = get_steps_for_feature(Feature.SCRAPE_URL, [])
     by_id = {s.id: s.label for s in steps}
     assert by_id["card_detection"] == "Detecting card names (YOLO)"
-    assert by_id["card_recognition"] == "Reading card names (OCR)"
+    assert by_id["card_recognition"] == "Reading card names (Vision LLM)"
 
 
 def test_no_use_extraction_service_parameter():

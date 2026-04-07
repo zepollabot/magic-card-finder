@@ -1,4 +1,11 @@
 services:
+  ollama:
+    image: ollama/ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
   detector:
     build:
       context: ./detector_service
@@ -10,6 +17,10 @@ services:
       - YOLO_CONFIDENCE=${YOLO_CONFIDENCE-0.4}
       - DETECTOR_DEBUG_DIR=${DETECTOR_DEBUG_DIR-/tmp/detector-debug}
       - ROBOFLOW_API_KEY=${ROBOFLOW_API_KEY-}
+      - TRAIN_WORKERS=${TRAIN_WORKERS-2}
+      - TRAIN_EPOCHS=${TRAIN_EPOCHS-100}
+      - TRAIN_BATCH=${TRAIN_BATCH-16}
+      - TRAIN_DEVICE=${TRAIN_DEVICE-cpu}
     ports:
       - "8002:8002"
     volumes:
@@ -24,14 +35,15 @@ services:
       dockerfile: Dockerfile
     environment:
       - LOG_LEVEL=${LOG_LEVEL-INFO}
-      - TESSERACT_LANGS=${TESSERACT_LANGS-eng+ita+fra+spa+deu}
-      - OCR_DEBUG_DIR=${OCR_DEBUG_DIR-/tmp/ocr-debug}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL-http://ollama:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL-llava}
     ports:
       - "8003:8003"
     volumes:
       - ./ocr_service/app:/app/app
-      - ./data/ocr-debug:/tmp/ocr-debug
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8003", "--reload"]
+    depends_on:
+      - ollama
 
   backend:
     build:
@@ -96,3 +108,4 @@ services:
 
 volumes:
   frontend_node_modules:
+  ollama_data:

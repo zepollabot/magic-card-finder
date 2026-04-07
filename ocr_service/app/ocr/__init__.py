@@ -1,11 +1,8 @@
-"""OCR module: name-crop image -> card name string."""
-from .protocols import Preprocessor, TextRecognizer
-from .preprocessor import NameCropPreprocessor
-from .tesseract_recognizer import TesseractCardRecognizer
+"""OCR module: name-crop image -> card name string via Ollama vision LLM."""
+from .protocols import TextRecognizer
+from .ollama_recognizer import OllamaTextRecognizer
 
 __all__ = [
-    "Preprocessor",
     "TextRecognizer",
-    "NameCropPreprocessor",
-    "TesseractCardRecognizer",
+    "OllamaTextRecognizer",
 ]

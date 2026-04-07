@@ -31,7 +31,7 @@ def get_steps_for_feature(
     elif feature == Feature.UPLOAD_IMAGES:
         add("image_upload", "Image upload")
         add("card_detection", "Detecting card names (YOLO)")
-        add("card_recognition", "Reading card names (OCR)")
+        add("card_recognition", "Reading card names (Vision LLM)")
         add("scryfall_normalize", "Card normalization via Scryfall")
         for src in price_source_names:
             add(f"price_source_{src}", f"Fetch prices from {src}")
@@ -39,7 +39,7 @@ def get_steps_for_feature(
     elif feature == Feature.SCRAPE_URL:
         add("scrape_urls", "Scrape URLs and download images")
         add("card_detection", "Detecting card names (YOLO)")
-        add("card_recognition", "Reading card names (OCR)")
+        add("card_recognition", "Reading card names (Vision LLM)")
         add("scryfall_normalize", "Card normalization via Scryfall")
         for src in price_source_names:
             add(f"price_source_{src}", f"Fetch prices from {src}")

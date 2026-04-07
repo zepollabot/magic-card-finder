@@ -1,4 +1,4 @@
-"""Protocol and HTTP client for the Tesseract OCR service."""
+"""Protocol and HTTP client for the OCR service."""
 from __future__ import annotations
 
 import base64

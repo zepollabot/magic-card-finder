@@ -35,10 +35,7 @@ def main():
     epochs = int(os.getenv("TRAIN_EPOCHS", "100"))
     batch = int(os.getenv("TRAIN_BATCH", "16"))
     device = os.getenv("TRAIN_DEVICE", "cpu")
-    workers = int(os.getenv("TRAIN_WORKERS", "0"))
-    if device == "cpu" and workers > 0:
-        print(f"WARNING: forcing workers=0 (was {workers}) — multiprocessing DataLoader on CPU adds overhead without GPU overlap benefit")
-        workers = 0
+    workers = int(os.getenv("TRAIN_WORKERS", "2"))
 
     print(f"Downloading dataset: {workspace}/{project_name} v{version_num}")
     rf = Roboflow(api_key=api_key)
